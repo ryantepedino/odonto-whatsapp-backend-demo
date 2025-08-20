@@ -1,0 +1,19 @@
+{
+  "name": "odonto-whatsapp-backend",
+  "version": "1.0.0",
+  "private": true,
+  "main": "server.js",
+  "type": "commonjs",
+  "scripts": {
+    "dev": "node --watch server.js",
+    "start": "node server.js"
+  },
+  "dependencies": {
+    "axios": "^1.7.2",
+    "body-parser": "^1.20.2",
+    "dotenv": "^17.2.1",
+    "express": "^4.19.2",
+    "twilio": "^5.8.0"
+  }
+}
+
