@@ -209,6 +209,18 @@ app.post('/twilio/whatsapp', async (req, res) => {
   return res.type('text/xml').status(200).send(twiml.toString());
 });
 
+// === Download público do CSV de leads (DEMO) ===
+app.get('/leads.csv', (req, res) => {
+  const path = './leads.csv';
+  if (!fs.existsSync(path)) {
+    return res.status(404).send('Ainda não há leads.');
+  }
+  res.setHeader('Content-Type', 'text/csv; charset=utf-8');
+  res.setHeader('Content-Disposition', 'attachment; filename="leads.csv"');
+  fs.createReadStream(path).pipe(res);
+});
+
+
 // ===== Listen =====
 app.listen(PORT, () => {
   console.log('✅ Server running on port', PORT);
