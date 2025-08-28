@@ -1,229 +1,127 @@
-// server.js — Data Tech | OdontoBot DEMO (Twilio Sandbox) — CommonJS
-
-require('dotenv').config();
-
+// server.js - DEMO estável para Render
 const express = require('express');
-const twilio  = require('twilio');
-const fs      = require('fs');
+const app = express();
 
-const app  = express();
-const PORT = process.env.PORT || 3000;
-
-// Twilio envia application/x-www-form-urlencoded
-app.use(express.urlencoded({ extended: true }));
+app.use(express.urlencoded({ extended: false }));
 app.use(express.json());
 
-// ===== Config DEMO/Handoff =====
-const WHATS_HUMANO   = process.env.WHATS_HUMANO || 'https://wa.me/5599999999999';
-const DEMO_MODE_RAW  = String(process.env.DEMO_MODE || 'true').toLowerCase();
-const IS_DEMO        = ['on','true','1','yes'].includes(DEMO_MODE_RAW);
+// ===== Config DEMO (edite se quiser) =====
+const CLINIC_NAME = process.env.CLINIC_NAME || 'Clínica DEMO';
+const CONVENIOS = (process.env.CONVENIOS || 'OdontoPrev, Amil Dental, Unimed').split(',').map(s=>s.trim());
+const ATENDENTE_LINK = process.env.ATENDENTE_LINK || ''; // ex: https://wa.me/5524999999999
+
+// Sessão simples em memória (suficiente para DEMO no Render)
+const session = new Map();     // key = whatsapp:+55..., value = {state, pending}
+
+// Util: gera TwiML seguro
+function twiml(text){
+  const safe = String(text).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+  return `<Response><Message>${safe}</Message></Response>`;
+}
 
 // ===== Health =====
-app.get('/health', (_req, res) => res.status(200).send('ok'));
+app.get('/health', (req, res) => res.status(200).send('OK'));
 
-// ===== Memória em RAM (stateful por usuário) =====
-const sessions = new Map(); // key => { step, period, slot, name }
+// ===== WhatsApp Webhook (Twilio) =====
+app.post('/twilio/whatsapp', (req, res) => {
+  const from = (req.body.From || '').toLowerCase();   // "whatsapp:+5524..."
+  const body = (req.body.Body || '').trim();
+  const msg  = body.toLowerCase();
 
-function getKeyFromBody(b) {
-  if (b.WaId) return `wa:${b.WaId}`;        // ID estável do WhatsApp dado pela Twilio
-  if (b.From) return String(b.From);        // fallback
-  return 'anon';
-}
-function getSession(key) {
-  if (!sessions.has(key)) sessions.set(key, { step: 'menu' });
-  return sessions.get(key);
-}
-function resetSession(key) { sessions.set(key, { step: 'menu' }); }
+  const s = session.get(from) || { state: 'menu', pending: null };
 
-function saveLead({ key, from, name, period, slot }) {
-  try {
-    const path   = './leads.csv';
-    const header = 'timestamp,key,from,name,period,slot,channel\n';
-    const line   = `${new Date().toISOString()},${JSON.stringify(key)},${JSON.stringify(from)},"${name}",${period},"${slot}",twilio-sandbox\n`;
-    if (!fs.existsSync(path)) fs.writeFileSync(path, header, 'utf8');
-    fs.appendFileSync(path, line, 'utf8');
-  } catch (e) {
-    console.error('Erro ao salvar lead:', e);
+  // Helpers
+  const menu = () =>
+`👋 Olá! Eu sou o Agente Odonto da ${CLINIC_NAME}.
+Escolha uma opção:
+1) Agendar consulta
+2) Convênios aceitos
+3) Orientações Pré/Pós
+4) Falar com atendente`;
+
+  const askAgendar = () =>
+`🗓️ Para agendar, me diga: procedimento + dia + horário.
+Exemplo: "limpeza amanhã às 15h".`;
+
+  // Roteamento por estado
+  let reply;
+
+  // Fluxo handoff: pediu atendente → coleta nome
+  if (s.state === 'coletando_nome') {
+    const nome = body.replace(/\s+/g,' ').trim();
+    reply = ATENDENTE_LINK
+      ? `Obrigada, ${nome}! 👩‍💼 Vou chamar o atendente agora: ${ATENDENTE_LINK}`
+      : `Obrigada, ${nome}! 👩‍💼 Vou avisar o atendente para te chamar em instantes.`;
+    s.state = 'menu';
   }
-}
-
-// ===== Textos e slots de exemplo (DEMO) =====
-const MENU_TXT =
-  'Olá! 😊 Sou a assistente da Clínica Sorriso Nova Era.\n' +
-  '1) Agendar consulta\n' +
-  '2) Convênios/valores\n' +
-  '3) Orientações pré/pós\n' +
-  '4) Falar com atendente';
-
-const CONVENIOS_TXT =
-  'Convênios aceitos (DEMO): OdontoPrev, Amil Dental, Unimed Odonto.\n' +
-  'Cobertura típica: avaliação, limpeza, restaurações simples.\n' +
-  'Quer marcar uma *avaliação* pelo convênio? Responda *sim* ou *não*.';
-
-const SLOTS = {
-  'manhã': ['Terça 09:30 – Dra. Ana', 'Quinta 10:15 – Dr. Paulo'],
-  'tarde': ['Quarta 15:00 – Dra. Ana', 'Sexta 16:30 – Dr. Paulo'],
-};
-
-// ===== Webhook Twilio WhatsApp (DEMO sem OpenAI) =====
-app.post('/twilio/whatsapp', async (req, res) => {
-  const b       = req.body || {};
-  const textRaw = String(b.Body ?? '').trim();
-  const text    = textRaw.toLowerCase();
-  const key     = getKeyFromBody(b);        // chave estável de sessão
-  const from    = b.From || '';
-
-  const MessagingResponse = twilio.twiml.MessagingResponse;
-  const twiml = new MessagingResponse();
-
-  const s = getSession(key);
-  console.log(`[DEMO] key=${key} step=${s.step} text="${textRaw}"`);
-
-  // ---- atalhos universais ----
-  if (/^menu$|^0$/.test(text)) {
-    resetSession(key);
-    twiml.message(MENU_TXT);
-    return res.type('text/xml').status(200).send(twiml.toString());
+  // Fluxo de confirmação de agendamento
+  else if (s.state === 'confirmando' && (msg.startsWith('1') || msg.includes('sim'))) {
+    const p = s.pending || {};
+    const resumo = `✅ Agendamento (DEMO) confirmado:
+- Procedimento: ${p.procedimento || '—'}
+- Data/Hora: ${p.dataHora || '—'}
+- Paciente: ${from.replace('whatsapp:','')}`;
+    reply = `${resumo}\n\nObrigado! Posso ajudar em algo mais?\n${menu()}`;
+    s.state = 'menu'; s.pending = null;
   }
-  if (/atendente|humano/i.test(textRaw)) {
-    twiml.message(`Claro! Vou te encaminhar: ${WHATS_HUMANO}`);
-    return res.type('text/xml').status(200).send(twiml.toString());
+  else if (s.state === 'confirmando' && (msg.startsWith('2') || msg.includes('alterar data'))) {
+    reply = 'Sem problemas! Informe novamente a data (ex.: "amanhã", "10/09").';
+    s.state = 'aguardando_dados';
   }
-
-  // ---- estado inicial / menu ----
-  if (s.step === 'menu') {
-    if (['1', 'agendar', 'agenda'].includes(text)) {
-      s.step = 'ask_period';
-      twiml.message('Perfeito! ✨ Prefere *manhã* ou *tarde*?');
-      return res.type('text/xml').status(200).send(twiml.toString());
-    }
-    if (['2', 'convenios', 'convênios', 'convênio', 'convênio/valores', 'convênios/valores'].includes(text)) {
-      s.step = 'conv_yesno';
-      twiml.message(CONVENIOS_TXT);
-      return res.type('text/xml').status(200).send(twiml.toString());
-    }
-    if (['3', 'pré', 'pre', 'pre/pós', 'pré/pós', 'orientações', 'orientacoes'].includes(text)) {
-      twiml.message('Pré-limpeza: escove normalmente, evite café/vinho 3h antes, traga documento e carteirinha. Quer agendar? Digite *1* (Agendar) ou *menu*.');
-      return res.type('text/xml').status(200).send(twiml.toString());
-    }
-    if (['4', 'atendente'].includes(text)) {
-      twiml.message(`Claro! Vou te encaminhar: ${WHATS_HUMANO}`);
-      return res.type('text/xml').status(200).send(twiml.toString());
-    }
-    // fallback do menu
-    twiml.message(MENU_TXT);
-    return res.type('text/xml').status(200).send(twiml.toString());
+  else if (s.state === 'confirmando' && (msg.startsWith('3') || msg.includes('alterar horário') || msg.includes('alterar horario'))) {
+    reply = 'Claro! Informe novamente o horário (ex.: "15h", "09:30").';
+    s.state = 'aguardando_dados';
   }
+  // Coleta de dados livres para agendar
+  else if (s.state === 'aguardando_dados') {
+    const proc = (body.match(/(limpeza|avaliação|avaliacao|canal|extração|extracao|implante|restauração|restauracao|clareamento)/i)||[])[0] || 'procedimento';
+    // data simples
+    let dataTxt = 'data a combinar';
+    if (msg.includes('amanhã') || msg.includes('amanha')) dataTxt = 'amanhã';
+    else if (/\b\d{1,2}\/\d{1,2}\b/.test(msg)) dataTxt = msg.match(/\b\d{1,2}\/\d{1,2}\b/)[0];
 
-  // ---- fluxo vindo de Convênios ----
-  if (s.step === 'conv_yesno') {
-    if (['sim', 's', 'quero', 'ok', 'yes'].includes(text)) {
-      s.step = 'ask_period';
-      twiml.message('Ótimo! Para avaliação pelo convênio, prefere *manhã* ou *tarde*?');
-      return res.type('text/xml').status(200).send(twiml.toString());
-    }
-    if (['nao', 'não', 'n', 'no'].includes(text)) {
-      resetSession(key);
-      twiml.message('Sem problemas! Quando quiser, digite *menu* para começar de novo.');
-      return res.type('text/xml').status(200).send(twiml.toString());
-    }
-    twiml.message('Responda *sim* para agendar avaliação pelo convênio, ou *não* para voltar.');
-    return res.type('text/xml').status(200).send(twiml.toString());
+    // horário simples
+    let horaTxt = (msg.match(/\b\d{1,2}[:h]\d{2}\b/)||msg.match(/\b\d{1,2}h\b/)||[])[0] || 'horário a combinar';
+    horaTxt = horaTxt.replace('h',':00');
+
+    const dataHora = `${dataTxt} ${horaTxt}`.trim();
+
+    s.pending = { procedimento: proc, dataHora };
+    s.state = 'confirmando';
+    reply = `Resumo (DEMO): ${proc}, ${dataHora}.
+Confirma? (1 Sim / 2 Alterar data / 3 Alterar horário)`;
+  }
+  // Entradas diretas que caem no fluxo de agendar
+  else if (msg === '1' || msg.includes('agendar')) {
+    reply = askAgendar();
+    s.state = 'aguardando_dados';
+  }
+  else if (msg === '2' || msg.includes('convênio') || msg.includes('convenio')) {
+    reply = `🏥 Convênios aceitos: ${CONVENIOS.join(', ')}.
+Quer (1) agendar ou (4) falar com atendente?`;
+    s.state = 'menu';
+  }
+  else if (msg === '3' || msg.includes('pré') || msg.includes('pós') || msg.includes('pre') || msg.includes('pos')) {
+    reply = `📋 Pré/Pós (resumo):
+• Extração: repouso 24h, compressa gelada.
+• Limpeza: evitar café 2h.
+• Implante: seguir medicação prescrita.
+(Conteúdo completo no site da clínica.)
+${menu()}`;
+    s.state = 'menu';
+  }
+  else if (msg === '4' || msg.includes('atendente')) {
+    reply = '👩‍💼 Posso te passar para um atendente humano. Qual seu nome?';
+    s.state = 'coletando_nome';
+  }
+  else {
+    reply = menu();
+    s.state = 'menu';
   }
 
-  // ---- escolher período ----
-  if (s.step === 'ask_period') {
-    const sayManha = /manh(a|ã)/.test(text);
-    const sayTarde = /tarde/.test(text);
-    if (!sayManha && !sayTarde) {
-      twiml.message('Para continuar, responda *manhã* ou *tarde* 😉');
-      return res.type('text/xml').status(200).send(twiml.toString());
-    }
-    s.period = sayManha ? 'manhã' : 'tarde';
-    s.step   = 'pick_slot';
-    const opts = SLOTS[s.period];
-    twiml.message(
-      `Opções (${s.period}):\n` +
-      `1) ${opts[0]}\n` +
-      `2) ${opts[1]}\n` +
-      `Responda *1* ou *2*.`
-    );
-    return res.type('text/xml').status(200).send(twiml.toString());
-  }
-
-  // ---- escolher horário ----
-  if (s.step === 'pick_slot') {
-    if (!['1', '2'].includes(text)) {
-      twiml.message('Responda *1* ou *2* para escolher o horário.');
-      return res.type('text/xml').status(200).send(twiml.toString());
-    }
-    const idx = text === '1' ? 0 : 1;
-    s.slot = SLOTS[s.period][idx];
-    s.step = 'ask_name';
-    twiml.message('Perfeito! Para finalizar, me diga seu *nome completo*.');
-    return res.type('text/xml').status(200).send(twiml.toString());
-  }
-
-  // ---- capturar nome ----
-  if (s.step === 'ask_name') {
-    if (text.length < 2) {
-      twiml.message('Pode enviar seu *nome completo*, por favor?');
-      return res.type('text/xml').status(200).send(twiml.toString());
-    }
-    s.name = textRaw; // preserva capitalização
-    s.step = 'confirm';
-    twiml.message(
-      '✅ *Resumo da avaliação (DEMO)*\n' +
-      `• Nome: ${s.name}\n` +
-      `• Período: ${s.period}\n` +
-      `• Horário: ${s.slot}\n\n` +
-      'Responda: *confirmar* | *reagendar* | *cancelar*'
-    );
-    return res.type('text/xml').status(200).send(twiml.toString());
-  }
-
-  // ---- confirmar / reagendar / cancelar ----
-  if (s.step === 'confirm') {
-    if (text === 'confirmar') {
-      saveLead({ key, from, name: s.name, period: s.period, slot: s.slot });
-      resetSession(key);
-      twiml.message('🎉 Confirmado (DEMO)! Vamos enviar as instruções de pré-consulta. Se precisar, digite *menu*.');
-      return res.type('text/xml').status(200).send(twiml.toString());
-    }
-    if (text === 'reagendar') {
-      s.step = 'ask_period';
-      twiml.message('Sem problemas! Prefere *manhã* ou *tarde*?');
-      return res.type('text/xml').status(200).send(twiml.toString());
-    }
-    if (text === 'cancelar') {
-      resetSession(key);
-      twiml.message('Ok, agenda cancelada (DEMO). Se quiser começar de novo, digite *menu*.');
-      return res.type('text/xml').status(200).send(twiml.toString());
-    }
-    twiml.message('Responda *confirmar*, *reagendar* ou *cancelar* 🙂');
-    return res.type('text/xml').status(200).send(twiml.toString());
-  }
-
-  // ---- fallback geral ----
-  twiml.message('Não entendi 🙃. Digite *menu* para as opções.');
-  return res.type('text/xml').status(200).send(twiml.toString());
+  session.set(from, s);
+  res.type('text/xml').status(200).send(twiml(reply));
 });
 
-// === Download público do CSV de leads (DEMO) ===
-app.get('/leads.csv', (req, res) => {
-  const path = './leads.csv';
-  if (!fs.existsSync(path)) {
-    return res.status(404).send('Ainda não há leads.');
-  }
-  res.setHeader('Content-Type', 'text/csv; charset=utf-8');
-  res.setHeader('Content-Disposition', 'attachment; filename="leads.csv"');
-  fs.createReadStream(path).pipe(res);
-});
-
-
-// ===== Listen =====
-app.listen(PORT, () => {
-  console.log('✅ Server running on port', PORT);
-  console.log(`• Health: http://localhost:${PORT}/health`);
-  console.log('• Webhook (Twilio Sandbox WhatsApp): POST /twilio/whatsapp');
-});
+const PORT = process.env.PORT || 3000;
+app.listen(PORT, () => console.log('Servidor rodando na porta ' + PORT));
